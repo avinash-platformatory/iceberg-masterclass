@@ -1,8 +1,8 @@
 # Kafka → Iceberg: Real-Time Sink
 
 A self-contained lakehouse: fake e-commerce events stream through Kafka and land in
-Apache Iceberg tables on MinIO, cataloged by a Hive Metastore, queryable with DuckDB
-(and Spark). Everything runs in Docker Compose — no other dependencies.
+Apache Iceberg tables on MinIO, cataloged by a Hive Metastore, queryable with DuckDB,
+ClickHouse, and Spark. Everything runs in Docker Compose — no other dependencies.
 
 ```
 producers (fake data) ──> Kafka ──> Kafka Connect (Iceberg sink)
@@ -10,17 +10,16 @@ producers (fake data) ──> Kafka ──> Kafka Connect (Iceberg sink)
                                           v
         Hive Metastore (catalog) <── Iceberg REST facade
               │    ^                      ^
-       Postgres    │                      │
-                   │                   DuckDB
+       Postgres    │              DuckDB / ClickHouse
                  Spark
                                   data files live in MinIO
 ```
 
 The Hive Metastore is the catalog (its metadata lives in Postgres). Because Kafka
-Connect's Iceberg sink and DuckDB speak the Iceberg REST protocol rather than Hive
-thrift, a thin REST facade ([Apache Gravitino](https://gravitino.apache.org/)) sits in
-front of the metastore. Spark talks thrift to the metastore directly. All paths lead
-to the same tables.
+Connect's Iceberg sink, DuckDB, and ClickHouse speak the Iceberg REST protocol rather
+than Hive thrift, so a thin REST facade ([Apache Gravitino](https://gravitino.apache.org/))
+sits in front of the metastore. Spark talks thrift to the metastore directly. All
+paths lead to the same tables.
 
 ## Topics and tables
 
@@ -38,7 +37,7 @@ In step 9 you'll derive three more *gold-layer* tables from these with batch SQL
 ## Prerequisites
 
 - Docker with the Compose plugin (Docker Desktop on macOS/Windows, Docker Engine on Linux).
-- ~6 GB of RAM available to Docker and ~5 GB of disk for images.
+- ~6.5 GB of RAM available to Docker and ~5 GB of disk for images.
 
 That's it. Helper scripts, producers, and query shells all run inside containers.
 
@@ -70,8 +69,8 @@ docker compose ps
 ```
 
 You should see `kafka`, `connect`, `minio`, `postgres`, `hive-metastore`,
-`iceberg-rest`, `spark`, `kafka-ui` running, three `producer-*` containers streaming,
-and `minio-init` exited with code 0.
+`iceberg-rest`, `clickhouse`, `spark`, `kafka-ui` running, three `producer-*`
+containers streaming, and `minio-init` exited with code 0.
 
 ## Step 2 — Watch the streams
 
@@ -125,9 +124,23 @@ SELECT count(*) FROM lake.lakehouse.orders;  -- run it twice, it grows
 ```
 
 The full tour — aggregations, joins, CDC dedupe, time travel, metadata inspection —
-is in **[queries/duckdb.md](queries/duckdb.md)**. Spark has its own guide in
-**[queries/spark.md](queries/spark.md)** (used in steps 7–9); future chapters will
-add `queries/trino.md`, `queries/clickhouse.md`, etc.
+is in **[queries/duckdb.md](queries/duckdb.md)**.
+
+## Step 5b — Query with ClickHouse
+
+```bash
+docker compose exec -it clickhouse clickhouse-client
+```
+
+Follow **[queries/clickhouse.md](queries/clickhouse.md)** to register the Iceberg
+tables (via direct MinIO paths — Gravitino's REST catalog is incompatible with
+ClickHouse's `DataLakeCatalog` client) and run queries. The time-travel section
+(section 3) is the highlight: use `system.iceberg_history` to find snapshot IDs,
+then query `orders` as it looked at an earlier commit while the sink keeps
+appending new data.
+
+Spark has its own guide in **[queries/spark.md](queries/spark.md)** (used in steps
+7–9). Future chapters will add `queries/trino.md`, etc.
 
 ## Step 6 — Merge-on-Read (MoR)
 
@@ -207,6 +220,8 @@ docker compose down -v     # delete everything (Kafka, MinIO, metastore data)
 | MinIO console | http://localhost:9001 | minioadmin / minioadmin |
 | MinIO S3 API | http://localhost:9000 | minioadmin / minioadmin |
 | Iceberg REST catalog | http://localhost:9101/iceberg | — |
+| ClickHouse HTTP | http://localhost:8123 | default / (empty) |
+| ClickHouse native | `localhost:9002` | default / (empty) |
 
 ## Troubleshooting
 
@@ -217,6 +232,9 @@ docker compose down -v     # delete everything (Kafka, MinIO, metastore data)
   one record per topic; give it half a minute after registering.
 - **DuckDB `ATTACH` fails**: the REST facade may still be starting;
   `docker compose logs iceberg-rest --tail 50`.
+- **ClickHouse `SHOW TABLES FROM lake` is empty**: run the `CREATE TABLE` statements
+  from [queries/clickhouse.md](queries/clickhouse.md) section 1, and confirm
+  connectors are registered (step 3) so Parquet files exist in MinIO.
 - **Ports already in use**: change the `*_PORT` values in [.env](.env) and
   `docker compose up -d` again.
 - **Wiped state half-way**: `docker compose down -v && docker compose up -d --build`
