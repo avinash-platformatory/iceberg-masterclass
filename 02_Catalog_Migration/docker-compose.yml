@@ -91,3 +91,22 @@ services:
       - duckdb-home:/root
     entrypoint: ["/duckdb"]
     command: ["-init", "/init-polaris.sql"]
+
+  # PyIceberg client for Polaris (read-only demo).
+  # Usage: docker compose run --rm pyiceberg
+  pyiceberg:
+    build:
+      context: ./pyiceberg
+    profiles: ["tools"]
+    volumes:
+      - polaris-config:/polaris-config:ro
+    environment:
+      POLARIS_URL: http://polaris:8181
+      POLARIS_CATALOG_NAME: ${POLARIS_CATALOG_NAME}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      ICEBERG_NAMESPACE: ${ICEBERG_NAMESPACE}
+    depends_on:
+      polaris:
+        condition: service_healthy

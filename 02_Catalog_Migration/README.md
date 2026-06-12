@@ -55,7 +55,7 @@ This creates:
 - Namespace `lakehouse`
 - Principal `migration_user` with manage privileges
 
-Save the printed **Client ID** and **Client secret** — Spark needs them.
+Save the printed **Client ID** and **Client secret** — Spark and PyIceberg need them.
 
 ## Step 3 — Baseline on catalog A
 
@@ -95,6 +95,18 @@ HMS row counts grow and Polaris stays at the registered snapshot — that gap is
 intentional for this read-only module.
 
 Optional DuckDB comparison: **[queries/duckdb.md](queries/duckdb.md)**.
+
+## Step 5b — Query with PyIceberg
+
+Native Python client for the Polaris REST catalog:
+
+```bash
+docker compose run --rm pyiceberg
+```
+
+Lists registered tables, prints row counts, and shows the latest snapshot ID on
+`orders`. For interactive exploration and `register_table` examples, see
+**[queries/pyiceberg.md](queries/pyiceberg.md)**.
 
 ## Step 6 — Inspect MinIO
 
@@ -145,3 +157,7 @@ Module 01 keeps running independently.
   `polaris-setup` (catalog `allowedLocations` must include `s3a://warehouse`).
 - **Polaris port conflict** — change `POLARIS_API_PORT` / `POLARIS_ADMIN_PORT` in
   [.env](.env).
+- **PyIceberg `Missing Polaris credentials`** — run `polaris-setup` before
+  `pyiceberg`; credentials live in the `polaris-config` volume.
+- **PyIceberg S3 errors** — ensure MinIO is reachable at `minio:9000` from the
+  container network (module 01 must be running).
