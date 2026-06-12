@@ -1,0 +1,93 @@
+name: catalog-migration
+
+# Joins the running 01_Kafka_Iceberg stack network (project name: kafka-iceberg).
+networks:
+  default:
+    external: true
+    name: kafka-iceberg_default
+
+volumes:
+  polaris-config:
+  duckdb-home:
+
+services:
+  polaris:
+    image: apache/polaris:${POLARIS_VERSION}
+    container_name: polaris
+    ports:
+      - "${POLARIS_API_PORT}:8181"
+      - "${POLARIS_ADMIN_PORT}:8182"
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY}
+      POLARIS_BOOTSTRAP_CREDENTIALS: ${POLARIS_REALM},${POLARIS_ROOT_CLIENT_ID},${POLARIS_ROOT_CLIENT_SECRET}
+      polaris.realm-context.realms: ${POLARIS_REALM}
+      quarkus.otel.sdk.disabled: "true"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8182/q/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 18
+      start_period: 20s
+
+  # Step tool: create Polaris catalog + principal (writes credentials to polaris-config).
+  # Usage: docker compose run --rm polaris-setup
+  polaris-setup:
+    image: alpine:3.20
+    profiles: ["tools"]
+    volumes:
+      - ./scripts/polaris-setup.sh:/polaris-setup.sh:ro
+      - polaris-config:/polaris-config
+    environment:
+      POLARIS_URL: http://polaris:8181
+      POLARIS_REALM: ${POLARIS_REALM}
+      POLARIS_ROOT_CLIENT_ID: ${POLARIS_ROOT_CLIENT_ID}
+      POLARIS_ROOT_CLIENT_SECRET: ${POLARIS_ROOT_CLIENT_SECRET}
+      POLARIS_CATALOG_NAME: ${POLARIS_CATALOG_NAME}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET}
+      ICEBERG_NAMESPACE: ${ICEBERG_NAMESPACE}
+    entrypoint: ["/bin/sh", "/polaris-setup.sh"]
+    depends_on:
+      polaris:
+        condition: service_healthy
+
+  # Step tool: register bronze tables from MinIO metadata pointers into Polaris.
+  # Usage: docker compose run --rm register-tables
+  register-tables:
+    build:
+      context: ./tools
+    profiles: ["tools"]
+    volumes:
+      - ./scripts/register-tables.sh:/register-tables.sh:ro
+      - polaris-config:/polaris-config:ro
+    environment:
+      POLARIS_URL: http://polaris:8181
+      POLARIS_REALM: ${POLARIS_REALM}
+      POLARIS_CATALOG_NAME: ${POLARIS_CATALOG_NAME}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET}
+      ICEBERG_NAMESPACE: ${ICEBERG_NAMESPACE}
+    entrypoint: ["/bin/sh", "/register-tables.sh"]
+    depends_on:
+      polaris:
+        condition: service_healthy
+
+  # Interactive shell with Gravitino (lake) + Polaris catalogs attached.
+  # Usage: docker compose run --rm duckdb
+  duckdb:
+    image: duckdb/duckdb:${DUCKDB_VERSION}
+    profiles: ["tools"]
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./duckdb/init-polaris.sql:/init-polaris.sql:ro
+      - polaris-config:/polaris-config:ro
+      - duckdb-home:/root
+    entrypoint: ["/duckdb"]
+    command: ["-init", "/init-polaris.sql"]

@@ -261,6 +261,12 @@ Still in the Spark shell, follow section 4 of
 you can immediately query them from DuckDB too (gold-layer section of
 [queries/duckdb.md](queries/duckdb.md)).
 
+## Next module — Catalog migration
+
+Module **[02_Catalog_Migration](../02_Catalog_Migration/)** registers the same bronze
+tables into Apache Polaris (REST catalog B) without moving Parquet files — a
+read-only HMS → REST migration demo.
+
 ## Step 10 — Tear down
 
 ```bash
