@@ -29,6 +29,10 @@ paths lead to the same tables.
 | `customers` | `lakehouse.customers` | CDC-style profile updates, unpartitioned | merge-on-read |
 | `payments` | `lakehouse.payments` | append-only facts, partitioned by `day(payment_ts)` | defaults |
 
+`orders` gains a `channel` column when you run `docker compose run --rm evolve-orders-schema`
+(streaming schema evolution via the Kafka Connect sink). `customers` gains `referral_code`
+when you run `ALTER TABLE … ADD COLUMN` in Spark (engine-side evolution).
+
 In step 9 you'll derive three more *gold-layer* tables from these with batch SQL
 (no topic behind them): `lakehouse.customer_dim` (deduplicated profiles),
 `lakehouse.order_payment_fact` (three-way join), and `lakehouse.daily_revenue`
@@ -141,6 +145,60 @@ appending new data.
 
 Spark has its own guide in **[queries/spark.md](queries/spark.md)** (used in steps
 7–9). Future chapters will add `queries/trino.md`, etc.
+
+## Step 5c — Schema evolution
+
+Iceberg lets you add columns without rewriting existing files. This demo shows two
+paths: the Kafka Connect sink evolving `orders` as the stream widens, and Spark
+evolving `customers` with DDL.
+
+1. **Baseline** — in DuckDB (or ClickHouse), confirm `orders` has no `channel` yet:
+
+   ```sql
+   DESCRIBE lake.lakehouse.orders;   -- DuckDB
+   -- or: DESCRIBE lake.orders;      -- ClickHouse
+   ```
+
+2. **Trigger streaming evolution** — from the project directory:
+
+   ```bash
+   docker compose run --rm evolve-orders-schema
+   ```
+
+3. **Watch the producer** switch to schema v2:
+
+   ```bash
+   docker compose logs -f producer-orders
+   ```
+
+   Look for: `orders: schema v2 active (added channel)`.
+
+4. **Wait ~15 seconds** for the next sink commit, then re-query `orders` — `channel`
+   is present. Older rows have `NULL`; new rows carry `web`, `mobile`, or `api`:
+
+   ```sql
+   SELECT channel, count(*) FROM lake.lakehouse.orders GROUP BY channel;
+   ```
+
+5. **Trigger engine evolution** — in the Spark shell:
+
+   ```bash
+   docker compose exec -it spark spark-sql
+   ```
+
+   ```sql
+   ALTER TABLE lake.lakehouse.customers ADD COLUMN referral_code STRING;
+   SELECT customer_id, referral_code FROM lake.lakehouse.customers LIMIT 10;
+   ```
+
+6. **Confirm from DuckDB and ClickHouse** — `referral_code` is visible on
+   `customers` (all `NULL` until you update rows or new CDC events arrive).
+
+7. **Deeper examples** — time travel on pre-evolution snapshots, optional `UPDATE`s,
+   and engine-specific syntax in:
+   - [queries/duckdb.md](queries/duckdb.md) — Schema evolution
+   - [queries/clickhouse.md](queries/clickhouse.md) — section 4
+   - [queries/spark.md](queries/spark.md) — section 5
 
 ## Step 6 — Merge-on-Read (MoR)
 

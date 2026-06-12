@@ -154,6 +154,75 @@ ORDER BY order_date DESC;
 These are batch snapshots: the bronze tables keep growing while gold tables stand
 still. Refresh them by re-running the `CREATE OR REPLACE` statements in Spark.
 
+## Schema evolution
+
+Iceberg adds columns without rewriting existing Parquet files. Two demos: streaming
+evolution on `orders` (Kafka Connect sink) and engine evolution on `customers` (Spark
+`ALTER TABLE` — see [spark.md](spark.md) section 5).
+
+### Orders — before trigger
+
+```sql
+DESCRIBE lake.lakehouse.orders;  -- no channel column yet
+
+SELECT count(*) FROM lake.lakehouse.orders;
+```
+
+### Orders — after streaming evolution
+
+Trigger schema v2 from the host (in another terminal):
+
+```bash
+docker compose run --rm evolve-orders-schema
+```
+
+Tail the producer to confirm the switch:
+
+```bash
+docker compose logs -f producer-orders   # orders: schema v2 active (added channel)
+```
+
+Wait ~15 seconds for the next sink commit, then:
+
+```sql
+DESCRIBE lake.lakehouse.orders;  -- channel appears
+
+SELECT channel, count(*) AS n
+FROM lake.lakehouse.orders
+GROUP BY channel;
+
+SELECT count(*) AS with_channel
+FROM lake.lakehouse.orders
+WHERE channel IS NOT NULL;
+```
+
+Older rows have `channel = NULL`; new rows carry `web`, `mobile`, or `api`.
+
+### Orders — time travel before evolution
+
+Query a snapshot from before you ran `evolve-orders-schema`:
+
+```sql
+SELECT snapshot_id, timestamp_ms FROM iceberg_snapshots(lake.lakehouse.orders);
+
+SELECT channel, count(*) AS n
+FROM lake.lakehouse.orders AT (VERSION => <snapshot_id_before_evolution>)
+GROUP BY channel;
+```
+
+Every row shows `channel` as null — the current schema is projected onto older files.
+
+### Customers — after Spark ALTER
+
+After running `ALTER TABLE lake.lakehouse.customers ADD COLUMN referral_code STRING`
+in Spark (see [spark.md](spark.md)):
+
+```sql
+SELECT referral_code, count(*) AS n
+FROM lake.lakehouse.customers
+GROUP BY referral_code;
+```
+
 ## Limits to be aware of
 
 - DuckDB only writes merge-on-read (positional deletes). Copy-on-write updates,

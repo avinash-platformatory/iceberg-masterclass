@@ -187,6 +187,7 @@ services:
     entrypoint: ["/bin/sh", "/producers/produce-orders.sh"]
     volumes:
       - ./producers:/producers:ro
+      - schema-signals:/signals
     depends_on:
       kafka:
         condition: service_healthy
@@ -226,6 +227,15 @@ services:
     entrypoint: ["/bin/sh", "/register-connectors.sh"]
     environment:
       CONNECT_URL: http://connect:8083
+
+  # Step tool: triggers orders schema v2 (adds channel column to the stream).
+  # Usage: docker compose run --rm evolve-orders-schema
+  evolve-orders-schema:
+    image: alpine:3.20
+    profiles: ["tools"]
+    volumes:
+      - schema-signals:/signals
+    entrypoint: ["/bin/sh", "-c", "touch /signals/orders-v2 && echo 'orders schema v2 signal set'"]
 
   # Interactive SQL shell. Usage: docker compose run --rm duckdb
   duckdb:
@@ -284,3 +294,4 @@ volumes:
   postgres-data:
   duckdb-home:
   clickhouse-data:
+  schema-signals:

@@ -249,3 +249,71 @@ All six tables are ordinary Iceberg tables in the same catalog, so the gold tabl
 are immediately queryable from DuckDB too — see the gold-layer section in
 [duckdb.md](duckdb.md). Since they are batch snapshots, they go stale as streaming
 continues; re-run the `CREATE OR REPLACE` statements to refresh them.
+
+## 5. Schema evolution
+
+Iceberg lets you add columns without rewriting existing files. This demo shows two
+paths: streaming evolution via the Kafka Connect sink (`orders`) and engine evolution
+via Spark DDL (`customers`).
+
+### Orders — streaming evolution (add `channel`)
+
+The sink has `iceberg.tables.evolve-schema-enabled=true`. Before triggering v2,
+confirm the table has no `channel` column:
+
+```sql
+DESCRIBE TABLE lake.lakehouse.orders;
+```
+
+In another terminal, trigger schema v2 on the producer (adds nullable `channel` to
+the Kafka Connect JSON schema):
+
+```bash
+docker compose run --rm evolve-orders-schema
+docker compose logs -f producer-orders   # look for: schema v2 active (added channel)
+```
+
+Wait ~15 seconds for the next sink commit, then re-describe and query:
+
+```sql
+DESCRIBE TABLE lake.lakehouse.orders;
+
+SELECT channel, count(*) AS n
+FROM lake.lakehouse.orders
+GROUP BY channel;
+
+SELECT count(*) AS with_channel
+FROM lake.lakehouse.orders
+WHERE channel IS NOT NULL;
+```
+
+Rows written before evolution have `channel = NULL`; new rows carry `web`, `mobile`,
+or `api`. DuckDB and ClickHouse see the same column — see [duckdb.md](duckdb.md) and
+[clickhouse.md](clickhouse.md).
+
+Time-travel to a snapshot from before the trigger: every row shows `channel` as null
+(the current schema is applied to older files).
+
+### Customers — engine evolution (add `referral_code`)
+
+Spark can evolve the table directly:
+
+```sql
+DESCRIBE TABLE lake.lakehouse.customers;
+
+ALTER TABLE lake.lakehouse.customers ADD COLUMN referral_code STRING;
+
+DESCRIBE TABLE lake.lakehouse.customers;
+
+SELECT customer_id, referral_code
+FROM lake.lakehouse.customers
+LIMIT 10;
+```
+
+`referral_code` is `NULL` for all rows written before the `ALTER`. Optionally set a
+few values so the column is not all-null after compaction demos:
+
+```sql
+UPDATE lake.lakehouse.customers SET referral_code = 'FRIEND10' WHERE customer_id = 3;
+UPDATE lake.lakehouse.customers SET referral_code = 'WELCOME' WHERE customer_id = 12;
+```

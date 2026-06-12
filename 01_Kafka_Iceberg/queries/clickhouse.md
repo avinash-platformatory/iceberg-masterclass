@@ -165,7 +165,64 @@ query.
 For the same feature in DuckDB syntax, see the time-travel section of
 [duckdb.md](duckdb.md).
 
-## 4. Notes
+## 4. Schema evolution
+
+Same open-format behavior as DuckDB and Spark — new columns appear without rewriting
+existing files.
+
+### Orders — before trigger
+
+```sql
+DESCRIBE lake.orders;  -- no channel column yet
+
+SELECT count() FROM lake.orders;
+```
+
+### Orders — after streaming evolution
+
+From the host:
+
+```bash
+docker compose run --rm evolve-orders-schema
+docker compose logs -f producer-orders   # orders: schema v2 active (added channel)
+```
+
+Wait ~15 seconds for the next sink commit. If `DESCRIBE` already shows `channel` but
+`SELECT` fails with `FORMAT_VERSION_TOO_OLD`, re-register the table (same MinIO path —
+no data copy):
+
+```sql
+DROP TABLE IF EXISTS lake.orders;
+CREATE TABLE lake.orders
+ENGINE = IcebergS3('http://minio:9000/warehouse/lakehouse/lakehouse.db/orders/', 'minioadmin', 'minioadmin');
+```
+
+Then query:
+
+```sql
+DESCRIBE lake.orders;  -- channel appears
+
+SELECT channel, count() AS n
+FROM lake.orders
+GROUP BY channel;
+
+SELECT count() AS with_channel
+FROM lake.orders
+WHERE channel IS NOT NULL;
+```
+
+### Customers — after Spark ALTER
+
+After `ALTER TABLE lake.lakehouse.customers ADD COLUMN referral_code STRING` in Spark,
+re-register if needed (same pattern as `orders` above), then:
+
+```sql
+SELECT referral_code, count() AS n
+FROM lake.customers
+GROUP BY referral_code;
+```
+
+## 5. Notes
 
 - **Read-only in this demo** — compaction, CTAS, and row-level writes are done with
   Spark; see [spark.md](spark.md).
