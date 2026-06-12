@@ -1,0 +1,262 @@
+name: kafka-iceberg
+
+services:
+  # ----------------------------------------------------------------- Kafka --
+  kafka:
+    image: apache/kafka:${KAFKA_VERSION}
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      # INTERNAL for containers, EXTERNAL for clients on the host machine
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: kafka-iceberg-demo-cluster1
+    ports:
+      - "${KAFKA_EXTERNAL_PORT}:9094"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+  kafka-ui:
+    image: kafbat/kafka-ui:${KAFKA_UI_VERSION}
+    container_name: kafka-ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ------------------------------------------------------- Object storage --
+  minio:
+    image: minio/minio:${MINIO_VERSION}
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: creates the warehouse bucket then exits
+  minio-init:
+    image: minio/mc:${MC_VERSION}
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/warehouse &&
+      echo 'bucket ready'
+      "
+
+  # --------------------------------------------------------------- Catalog --
+  postgres:
+    image: postgres:${POSTGRES_VERSION}
+    container_name: postgres
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+      POSTGRES_DB: metastore
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  hive-metastore:
+    build:
+      context: ./metastore
+      args:
+        HIVE_VERSION: ${HIVE_VERSION}
+    # apache/hive:3.1.3 is amd64-only; Docker Desktop emulates it on ARM Macs
+    platform: linux/amd64
+    container_name: hive-metastore
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      HIVE_CUSTOM_CONF_DIR: /hive_custom_conf
+    volumes:
+      - ./metastore/conf:/hive_custom_conf:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9083"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+
+  # REST facade over the Hive Metastore so REST-only clients
+  # (Kafka Connect sink, DuckDB) can use it as an Iceberg catalog
+  iceberg-rest:
+    image: apache/gravitino-iceberg-rest:${GRAVITINO_VERSION}
+    container_name: iceberg-rest
+    environment:
+      GRAVITINO_CATALOG_BACKEND: hive
+      GRAVITINO_URI: thrift://hive-metastore:9083
+      GRAVITINO_WAREHOUSE: s3a://warehouse/lakehouse
+      GRAVITINO_IO_IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      GRAVITINO_S3_ENDPOINT: http://minio:9000
+      GRAVITINO_S3_ACCESS_KEY: minioadmin
+      GRAVITINO_S3_SECRET_KEY: minioadmin
+      GRAVITINO_S3_REGION: us-east-1
+      GRAVITINO_S3_PATH_STYLE_ACCESS: "true"
+      # Vend static S3 credentials to REST clients (DuckDB asks for them)
+      GRAVITINO_CREDENTIAL_PROVIDERS: s3-secret-key
+    ports:
+      - "${REST_CATALOG_PORT}:9001"
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+
+  # --------------------------------------------------------- Kafka Connect --
+  connect:
+    build:
+      context: ./connect
+      args:
+        CONNECT_VERSION: ${CONNECT_VERSION}
+        ICEBERG_CONNECTOR_VERSION: ${ICEBERG_CONNECTOR_VERSION}
+    container_name: connect
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      CONNECT_REST_PORT: 8083
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_GROUP_ID: connect-cluster
+      CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+    ports:
+      - "${CONNECT_PORT}:8083"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  # ------------------------------------------------------------- Producers --
+  producer-orders:
+    image: apache/kafka:${KAFKA_VERSION}
+    container_name: producer-orders
+    entrypoint: ["/bin/sh", "/producers/produce-orders.sh"]
+    volumes:
+      - ./producers:/producers:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  producer-customers:
+    image: apache/kafka:${KAFKA_VERSION}
+    container_name: producer-customers
+    entrypoint: ["/bin/sh", "/producers/produce-customers.sh"]
+    volumes:
+      - ./producers:/producers:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  producer-payments:
+    image: apache/kafka:${KAFKA_VERSION}
+    container_name: producer-payments
+    entrypoint: ["/bin/sh", "/producers/produce-payments.sh"]
+    volumes:
+      - ./producers:/producers:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ----------------------------------------------------- On-demand tooling --
+  # Step tool: registers the Iceberg sink connectors, then exits.
+  # Usage: docker compose run --rm register-connectors
+  register-connectors:
+    image: curlimages/curl:8.10.1
+    profiles: ["tools"]
+    volumes:
+      - ./scripts/register-connectors.sh:/register-connectors.sh:ro
+      - ./connect/connectors:/connectors:ro
+    entrypoint: ["/bin/sh", "/register-connectors.sh"]
+    environment:
+      CONNECT_URL: http://connect:8083
+
+  # Interactive SQL shell. Usage: docker compose run --rm duckdb
+  duckdb:
+    image: duckdb/duckdb:${DUCKDB_VERSION}
+    profiles: ["tools"]
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./duckdb/init.sql:/init.sql:ro
+      - duckdb-home:/root
+    entrypoint: ["/duckdb"]
+    command: ["-init", "/init.sql"]
+
+  # Batch engine for CoW updates, compaction and gold-layer tables.
+  # Usage: docker compose exec -it spark spark-sql   (see queries/spark.md)
+  spark:
+    image: tabulario/spark-iceberg:${SPARK_ICEBERG_VERSION}
+    container_name: spark
+    entrypoint: ["sleep", "infinity"]
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+    volumes:
+      - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+
+volumes:
+  kafka-data:
+  minio-data:
+  postgres-data:
+  duckdb-home:

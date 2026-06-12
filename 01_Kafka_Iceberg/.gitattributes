@@ -1,0 +1,9 @@
+# Force LF endings so scripts and SQL work inside Linux containers,
+# even when the repo is cloned on Windows.
+*.sh text eol=lf
+*.sql text eol=lf
+*.xml text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.conf text eol=lf
+.env text eol=lf
